@@ -27,7 +27,8 @@ module Kore =
     | LamBox of string * Term
     | App of Term * Term
     | Box of Term
-    | Let of string * Term * Term
+    | LetAff of string * Term * Term
+    | LetBox of string * Term * Term
     | Ann of Term * Typ
   
   let rec showTerm (trm : Term) =
@@ -37,7 +38,8 @@ module Kore =
     | LamBox (x, t) -> $"λ!{x}.{showTerm t}"
     | App (t, u) -> $"({showTerm t} {showTerm u})"
     | Box t -> $"!{showTerm t}"
-    | Let (x, t, u) -> $"let {x} = {showTerm t}\{showTerm u}"
+    | LetAff (x, t, u) -> $"let {x} = {showTerm t}\n{showTerm u}"
+    | LetBox (x, t, u) -> $"let! {x} = {showTerm t}\n{showTerm u}"
     | Ann (t, a) -> $"({showTerm t} : {showTyp a})"
   
   /// Values of terms of the simply typed very parsimonious lambda
@@ -73,7 +75,8 @@ module Kore =
       | VLamBox xt, VBox u -> xt @@ u
       | t, u -> VApp (t, u)
     | Box t -> VBox (eval env t)
-    | Let (x, t, u) -> eval ((x, eval env t) :: env) u
+    | LetAff (x, t, u) -> eval ((x, eval env t) :: env) u
+    | LetBox (x, Box t, u) -> eval ((x, eval env t) :: env) u
     | Ann (t, _) -> eval env t
 
   let inline (@@) (Closure (x, struct (env, t))) u =
@@ -136,9 +139,13 @@ module Kore =
       | _ -> failwith $"Inferred non-function application in {trm}."
     | Box t -> B (infer ctx (dep + 1) t)
     | Ann (t, typ) -> check ctx dep t typ; typ
-    | Let (x, t, u) ->
+    | LetAff (x, t, u) ->
       let a = infer ctx dep t
       let ting = Typing (Lin dep, a)
+      infer ((x, ting) :: ctx) dep u
+    | LetBox (x, t, u) ->
+      let a = infer ctx dep t
+      let ting = Typing (Exp dep, a)
       infer ((x, ting) :: ctx) dep u
   
   /// Bidirectional type checking.
@@ -160,6 +167,14 @@ module Kore =
       match typ with
       | B ty -> check ctx (dep + 1) t ty
       | _ -> failwith $"Type mismatch, box {trm} cannot have non-box type {typ}."
+    | LetAff (x, t, u) ->
+      let a = infer ctx dep t
+      let ting = Typing (Lin dep, a)
+      check ((x, ting) :: ctx) dep u typ
+    | LetBox (x, t, u) ->
+      let a = infer ctx dep t
+      let ting = Typing (Exp dep, a)
+      check ((x, ting) :: ctx) dep u typ
     | _ ->
       let inf = infer ctx dep trm
       if inf <> typ then
