@@ -104,9 +104,21 @@ module Kore =
   /// Normalization by evaluation.
   let normalize t = normalizeWith [] t
 
-  type Usage = Lin of int | Exp of int | Used
+  type Usage =
+    | Lin = 0
+    | Exp = 1
+    | Used = 3
   
-  type Typing = { Name : string; mutable Usage : Usage; Typ : Typ }
+  type Typing =
+    { Name : string; mutable Usage : Usage; Depth : int; Typ : Typ }
+  with
+    static member mkLin nam dep typ =
+      { Name = nam; Usage = Usage.Lin; Depth = dep; Typ = typ }
+      
+    static member mkExp nam dep typ =
+      { Name = nam; Usage = Usage.Exp; Depth = dep; Typ = typ }
+
+    member this.Use () = this.Usage <- Usage.Used
 
   let rec getTyping (ctx : Typing list) x =
     match ctx with
@@ -121,12 +133,12 @@ module Kore =
       match getTyping ctx x with
       | ValueSome ting ->
         match ting.Usage with
-        | Lin d when d = dep -> ting.Usage <- Used; ting.Typ
-        | Lin _ -> failwith $"Linear var {x} breaks depth restriction."
-        | Exp d when d = dep -> ting.Typ
-        | Exp d when d = dep - 1 -> ting.Usage <- Used; ting.Typ
-        | Exp _ -> failwith $"Exponential var {x} breaks depth restriction."
-        | Used -> failwith $"Var {x} breaks affine usage rules."
+        | Usage.Lin when ting.Depth = dep -> ting.Use (); ting.Typ
+        | Usage.Lin -> failwith $"Linear var {x} breaks depth restriction."
+        | Usage.Exp when ting.Depth = dep -> ting.Typ
+        | Usage.Exp when ting.Depth = dep - 1 -> ting.Use (); ting.Typ
+        | Usage.Exp -> failwith $"Exponential var {x} breaks depth restriction."
+        | _ (* Usage.Used *) -> failwith $"Var {x} breaks affine usage rules."
       | ValueNone -> failwith $"Untyped var {x}."
     | LamAff _ | LamBox _ -> failwith "Can't infer types of raw lambdas."
     | App (f, a) ->
@@ -137,7 +149,7 @@ module Kore =
     | Ann (t, typ) -> check ctx dep t typ; typ
     | Let (x, t, u) ->
       let a = infer ctx dep t
-      let xa = { Name = x; Usage = Lin dep; Typ = a }
+      let xa = Typing.mkLin x dep a
       infer (xa :: ctx) dep u
   
   /// Bidirectional type checking.
@@ -146,13 +158,13 @@ module Kore =
     | LamAff (x, b) ->
       match typ with
       | Hom (c, d) ->
-        let xc = { Name = x; Usage = Lin dep; Typ = c }
+        let xc = Typing.mkLin x dep c
         check (xc :: ctx) dep b d
       | _ -> failwith $"Affine lambda can't have non-function type {typ}."
     | LamBox (x, b) ->
       match typ with
       | Hom (B c, d) ->
-        let xc = { Name = x; Usage = Exp dep; Typ = c }
+        let xc = Typing.mkExp x dep c
         check (xc :: ctx) dep b d
       | _ -> failwith $"Box-lambda can't have non-box-function type {typ}."
     | Box t ->
