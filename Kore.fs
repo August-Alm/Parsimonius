@@ -2,19 +2,23 @@ namespace Parsimonious
 
 module Kore =
 
+  let rec lookup (xks : (string * 'a) list) x =
+    match xks with
+    | (y, v) :: _ when y = x -> ValueSome v
+    | _ :: xks -> lookup xks x
+    | [] -> ValueNone
+
+  /// Types of the simple typed very parsimonious lambda calculus.
   type Typ = O | Hom of Typ * Typ | B of Typ
 
-  let rec showTyp (typ : Typ) : string =
-    match typ with
-    | O -> "o"
-    | Hom (a, b) -> $"{go a} -> {go b}"
-    | B a -> $"!{go a}"
-  
-  and private go typ =
-    match typ with
-    | O -> "o"
-    | Hom (a, b) -> $"({go a} -> {go b})"
-    | B a -> $"!{go a}"
+  let showTyp (typ : Typ) : string =
+    let inline paren p s = if p then $"({s})" else s
+    let rec go p (typ : Typ) : string =
+      match typ with
+      | O -> "o"
+      | Hom (a, b) -> paren p $"{go true a} -> {go true b}"
+      | B a -> $"!{go true a}"
+    go false typ
 
   /// Terms of the simply typed very parsimonious lambda calculus.
   type Term =
@@ -50,12 +54,6 @@ module Kore =
   and [<Struct>] Closure =
     Closure of (string * struct (Env * Term))
 
-  let rec lookup (env : Env) x =
-    match env with
-    | (y, v) :: _ when y = x -> ValueSome v
-    | _ :: env -> lookup env x
-    | [] -> ValueNone
-
   let rec fresh (env : Env) x =
     if x = "_" then x else
       match lookup env x with
@@ -78,7 +76,8 @@ module Kore =
     | Let (x, t, u) -> eval ((x, eval env t) :: env) u
     | Ann (t, _) -> eval env t
 
-  let inline (@@) (Closure (x, struct (env, t))) u = eval ((x, u) :: env) t
+  let inline (@@) (Closure (x, struct (env, t))) u =
+    eval ((x, u) :: env) t
   
   let rec quote env v =
     match v with
@@ -104,41 +103,31 @@ module Kore =
   /// Normalization by evaluation.
   let normalize t = normalizeWith [] t
 
-  type Usage =
-    | Lin = 0
-    | Exp = 1
-    | Used = 3
+  // TYPE SYSTEM
+
+  type Usage = Lin of int | Exp of int | Used
   
-  type Typing =
-    { Name : string; mutable Usage : Usage; Depth : int; Typ : Typ }
-  with
-    static member mkLin nam dep typ =
-      { Name = nam; Usage = Usage.Lin; Depth = dep; Typ = typ }
-      
-    static member mkExp nam dep typ =
-      { Name = nam; Usage = Usage.Exp; Depth = dep; Typ = typ }
+  type Typing (usage : Usage, typ : Typ) =
+    let mutable usage = usage
+    member _.Usage = usage
+    member _.Typ = typ
+    member _.Use () = usage <- Used
 
-    member this.Use () = this.Usage <- Usage.Used
-
-  let rec getTyping (ctx : Typing list) x =
-    match ctx with
-    | ting :: _ when ting.Name = x -> ValueSome ting 
-    | _ :: ctx -> getTyping ctx x
-    | [] -> ValueNone
+  type Ctx = (string * Typing) list
 
   /// Bidirectional type inference.
-  let rec infer ctx dep (trm : Term) =
+  let rec infer (ctx : Ctx) dep (trm : Term) =
     match trm with
     | Var x ->
-      match getTyping ctx x with
+      match lookup ctx x with
       | ValueSome ting ->
         match ting.Usage with
-        | Usage.Lin when ting.Depth = dep -> ting.Use (); ting.Typ
-        | Usage.Lin -> failwith $"Linear var {x} breaks depth restriction."
-        | Usage.Exp when ting.Depth = dep -> ting.Typ
-        | Usage.Exp when ting.Depth = dep - 1 -> ting.Use (); ting.Typ
-        | Usage.Exp -> failwith $"Exponential var {x} breaks depth restriction."
-        | _ (* Usage.Used *) -> failwith $"Var {x} breaks affine usage rules."
+        | Lin d when d = dep -> ting.Use (); ting.Typ
+        | Lin _ -> failwith $"Linear var {x} breaks depth restriction."
+        | Exp d when d = dep -> ting.Typ
+        | Exp d when d = dep - 1 -> ting.Use (); ting.Typ
+        | Exp _ -> failwith $"Exponential var {x} breaks depth restriction."
+        | Used -> failwith $"Var {x} breaks affine usage rules."
       | ValueNone -> failwith $"Untyped var {x}."
     | LamAff _ | LamBox _ -> failwith "Can't infer types of raw lambdas."
     | App (f, a) ->
@@ -149,8 +138,8 @@ module Kore =
     | Ann (t, typ) -> check ctx dep t typ; typ
     | Let (x, t, u) ->
       let a = infer ctx dep t
-      let xa = Typing.mkLin x dep a
-      infer (xa :: ctx) dep u
+      let ting = Typing (Lin dep, a)
+      infer ((x, ting) :: ctx) dep u
   
   /// Bidirectional type checking.
   and check ctx dep trm typ =
@@ -158,14 +147,14 @@ module Kore =
     | LamAff (x, b) ->
       match typ with
       | Hom (c, d) ->
-        let xc = Typing.mkLin x dep c
-        check (xc :: ctx) dep b d
+        let ting = Typing (Lin dep, c)
+        check ((x, ting) :: ctx) dep b d
       | _ -> failwith $"Affine lambda can't have non-function type {typ}."
     | LamBox (x, b) ->
       match typ with
       | Hom (B c, d) ->
-        let xc = Typing.mkExp x dep c
-        check (xc :: ctx) dep b d
+        let ting = Typing (Exp dep, c)
+        check ((x, ting) :: ctx) dep b d
       | _ -> failwith $"Box-lambda can't have non-box-function type {typ}."
     | Box t ->
       match typ with
